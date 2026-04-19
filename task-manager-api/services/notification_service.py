@@ -1,14 +1,19 @@
 import smtplib
 from datetime import datetime
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class NotificationService:
     def __init__(self):
         self.notifications = []
-        self.email_host = 'smtp.gmail.com'
-        self.email_port = 587
+        self.email_host = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+        self.email_port = int(os.environ.get('EMAIL_PORT', 587))
         self.email_user = os.environ.get('EMAIL_USER')
         self.email_password = os.environ.get('EMAIL_PASSWORD')
+        if not self.email_user or not self.email_password:
+            raise RuntimeError("EMAIL_USER and EMAIL_PASSWORD environment variables must be set")
 
     def send_email(self, to, subject, body):
         try:
