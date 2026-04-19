@@ -1,211 +1,167 @@
 from flask import Blueprint, request, jsonify
-from database import db
+from controllers import user_controller
 from models.user import User
-from models.task import Task
-from datetime import datetime
-import hashlib, json, re
+import re
+import logging
 
 user_bp = Blueprint('users', __name__)
+logger = logging.getLogger(__name__)
+
+VALID_ROLES = ['user', 'admin', 'manager']
+MIN_PASSWORD_LENGTH = 4
+EMAIL_REGEX = r'^[a-zA-Z0-9+_.-]+@[a-zA-Z0-9.-]+$'
+
 
 @user_bp.route('/users', methods=['GET'])
 def get_users():
-    users = User.query.all()
-    result = []
-    for u in users:
-        user_data = {
-            'id': u.id,
-            'name': u.name,
-            'email': u.email,
-            'role': u.role,
-            'active': u.active,
-            'created_at': str(u.created_at),
-            'task_count': len(u.tasks)
-        }
-        result.append(user_data)
-    return jsonify(result), 200
+    try:
+        users = user_controller.get_all_users()
+        return jsonify(users), 200
+    except Exception as e:
+        logger.error(f"Error fetching users: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+
 
 @user_bp.route('/users/<int:user_id>', methods=['GET'])
 def get_user(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'Usuário não encontrado'}), 404
+    try:
+        user = user_controller.get_user_with_tasks(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        return jsonify(user), 200
+    except Exception as e:
+        logger.error(f"Error fetching user: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
-    data = user.to_dict()
-
-    tasks = Task.query.filter_by(user_id=user_id).all()
-    data['tasks'] = []
-    for t in tasks:
-        data['tasks'].append(t.to_dict())
-
-    return jsonify(data), 200
 
 @user_bp.route('/users', methods=['POST'])
 def create_user():
-    data = request.get_json()
-
-    if not data:
-        return jsonify({'error': 'Dados inválidos'}), 400
-
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
-    role = data.get('role', 'user')
-
-    if not name:
-        return jsonify({'error': 'Nome é obrigatório'}), 400
-    if not email:
-        return jsonify({'error': 'Email é obrigatório'}), 400
-    if not password:
-        return jsonify({'error': 'Senha é obrigatória'}), 400
-
-    if not re.match(r'^[a-zA-Z0-9+_.-]+@[a-zA-Z0-9.-]+$', email):
-        return jsonify({'error': 'Email inválido'}), 400
-
-    if len(password) < 4:
-        return jsonify({'error': 'Senha deve ter no mínimo 4 caracteres'}), 400
-
-    existing = User.query.filter_by(email=email).first()
-    if existing:
-        return jsonify({'error': 'Email já cadastrado'}), 409
-
-    if role not in ['user', 'admin', 'manager']:
-        return jsonify({'error': 'Role inválido'}), 400
-
-    user = User()
-    user.name = name
-    user.email = email
-    user.set_password(password)
-    user.role = role
-
     try:
-        db.session.add(user)
-        db.session.commit()
-        print(f"Usuário criado: {user.id} - {user.name}")
+        data = request.get_json()
 
-        response_data = user.to_dict()
-        return jsonify(response_data), 201
+        if not data:
+            return jsonify({'error': 'Invalid data'}), 400
+
+        name = data.get('name')
+        email = data.get('email')
+        password = data.get('password')
+        role = data.get('role', 'user')
+
+        if not name:
+            return jsonify({'error': 'Name is required'}), 400
+        if not email:
+            return jsonify({'error': 'Email is required'}), 400
+        if not password:
+            return jsonify({'error': 'Password is required'}), 400
+
+        if not re.match(EMAIL_REGEX, email):
+            return jsonify({'error': 'Invalid email format'}), 400
+
+        if len(password) < MIN_PASSWORD_LENGTH:
+            return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+
+        if User.query.filter_by(email=email).first():
+            return jsonify({'error': 'Email already registered'}), 409
+
+        if role not in VALID_ROLES:
+            return jsonify({'error': 'Invalid role'}), 400
+
+        user = user_controller.create_user(name, email, password, role)
+        return jsonify(user.to_dict()), 201
     except Exception as e:
-        db.session.rollback()
-        print(f"ERRO: {str(e)}")
-        return jsonify({'error': 'Erro ao criar usuário'}), 500
+        logger.error(f"Error creating user: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Error creating user'}), 500
+
 
 @user_bp.route('/users/<int:user_id>', methods=['PUT'])
 def update_user(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'Usuário não encontrado'}), 404
-
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Dados inválidos'}), 400
-
-    if 'name' in data:
-        user.name = data['name']
-
-    if 'email' in data:
-        if not re.match(r'^[a-zA-Z0-9+_.-]+@[a-zA-Z0-9.-]+$', data['email']):
-            return jsonify({'error': 'Email inválido'}), 400
-
-        existing = User.query.filter_by(email=data['email']).first()
-        if existing and existing.id != user_id:
-            return jsonify({'error': 'Email já cadastrado'}), 409
-        user.email = data['email']
-
-    if 'password' in data:
-        if len(data['password']) < 4:
-            return jsonify({'error': 'Senha muito curta'}), 400
-        user.set_password(data['password'])
-
-    if 'role' in data:
-        if data['role'] not in ['user', 'admin', 'manager']:
-            return jsonify({'error': 'Role inválido'}), 400
-        user.role = data['role']
-
-    if 'active' in data:
-        user.active = data['active']
-
     try:
-        db.session.commit()
-        return jsonify(user.to_dict()), 200
-    except:
-        db.session.rollback()
-        return jsonify({'error': 'Erro ao atualizar'}), 500
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid data'}), 400
+
+        update_data = {}
+
+        if 'name' in data:
+            update_data['name'] = data['name']
+
+        if 'email' in data:
+            if not re.match(EMAIL_REGEX, data['email']):
+                return jsonify({'error': 'Invalid email format'}), 400
+            existing = User.query.filter_by(email=data['email']).first()
+            if existing and existing.id != user_id:
+                return jsonify({'error': 'Email already registered'}), 409
+            update_data['email'] = data['email']
+
+        if 'password' in data:
+            if len(data['password']) < MIN_PASSWORD_LENGTH:
+                return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+            update_data['password'] = data['password']
+
+        if 'role' in data:
+            if data['role'] not in VALID_ROLES:
+                return jsonify({'error': 'Invalid role'}), 400
+            update_data['role'] = data['role']
+
+        if 'active' in data:
+            update_data['active'] = data['active']
+
+        updated_user = user_controller.update_user(user_id, **update_data)
+        return jsonify(updated_user.to_dict()), 200
+    except Exception as e:
+        logger.error(f"Error updating user: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Error updating user'}), 500
+
 
 @user_bp.route('/users/<int:user_id>', methods=['DELETE'])
 def delete_user(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'Usuário não encontrado'}), 404
-
-    tasks = Task.query.filter_by(user_id=user_id).all()
-    for t in tasks:
-        db.session.delete(t)
-
     try:
-        db.session.delete(user)
-        db.session.commit()
-        print(f"Usuário deletado: {user_id}")
-        return jsonify({'message': 'Usuário deletado com sucesso'}), 200
-    except:
-        db.session.rollback()
-        return jsonify({'error': 'Erro ao deletar'}), 500
+        if not user_controller.delete_user(user_id):
+            return jsonify({'error': 'User not found'}), 404
+        return jsonify({'message': 'User deleted successfully'}), 200
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Error deleting user'}), 500
+
 
 @user_bp.route('/users/<int:user_id>/tasks', methods=['GET'])
 def get_user_tasks(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'Usuário não encontrado'}), 404
+    try:
+        tasks = user_controller.get_user_tasks(user_id)
+        if tasks is None:
+            return jsonify({'error': 'User not found'}), 404
+        return jsonify(tasks), 200
+    except Exception as e:
+        logger.error(f"Error fetching user tasks: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
-    tasks = Task.query.filter_by(user_id=user_id).all()
-    result = []
-    for t in tasks:
-        task_data = {}
-        task_data['id'] = t.id
-        task_data['title'] = t.title
-        task_data['description'] = t.description
-        task_data['status'] = t.status
-        task_data['priority'] = t.priority
-        task_data['created_at'] = str(t.created_at)
-        task_data['due_date'] = str(t.due_date) if t.due_date else None
-
-        if t.due_date:
-            if t.due_date < datetime.utcnow():
-                if t.status != 'done' and t.status != 'cancelled':
-                    task_data['overdue'] = True
-                else:
-                    task_data['overdue'] = False
-            else:
-                task_data['overdue'] = False
-        else:
-            task_data['overdue'] = False
-        result.append(task_data)
-
-    return jsonify(result), 200
 
 @user_bp.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Dados inválidos'}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid data'}), 400
 
-    email = data.get('email')
-    password = data.get('password')
+        email = data.get('email')
+        password = data.get('password')
 
-    if not email or not password:
-        return jsonify({'error': 'Email e senha são obrigatórios'}), 400
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
 
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return jsonify({'error': 'Credenciais inválidas'}), 401
+        user = user_controller.authenticate_user(email, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
 
-    if not user.check_password(password):
-        return jsonify({'error': 'Credenciais inválidas'}), 401
-
-    if not user.active:
-        return jsonify({'error': 'Usuário inativo'}), 403
-
-    return jsonify({
-        'message': 'Login realizado com sucesso',
-        'user': user.to_dict(),
-        'token': 'fake-jwt-token-' + str(user.id)
-    }), 200
+        return jsonify({
+            'message': 'Login successful',
+            'user': user.to_dict(),
+            'token': 'fake-jwt-token-' + str(user.id)
+        }), 200
+    except Exception as e:
+        logger.error(f"Error during login: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
